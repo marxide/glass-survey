@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+
+{% block content %}
+    <h1>GLASS Survey</h1>
+    
+    <label for="fieldSelect">Field</label>
+    <select id="fieldSelect" class="custom-select">
+        <option>A</option>
+        <option>B</option>
+        <option>C</option>
+        <option>D</option>
+        <option>E</option>
+        <option>F</option>
+    </select>
+
+    <div class="m-2 text-center">
+        <div class="loading">
+            <div class="spinner-border m-5" role="status" id="plotSpinner">
+                <span class="sr-only">Loading...</span>
+            </div>
+        </div>
+        <div id="plot"></div>
+    </div>
+{% endblock %}
+
+{% block extrascript %}
+    <script type="text/javascript">
+        function getPlot(field) {
+            $(".loading").show();
+            $.getJSON('plots', {field: $("#fieldSelect").val()})
+                .done(function(plot) {
+                    $(".loading").hide();
+                    $("#plot").empty();
+                    Bokeh.embed.embed_item(plot, "plot");
+                })
+        }
+        $(document).ready(function() {
+            getPlot("A");
+            $("#fieldSelect").change(function(event) {
+                var field = $(this).val();
+                getPlot(field);
+            });
+        });
+    </script>
+{% endblock%}
