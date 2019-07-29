@@ -12,6 +12,10 @@
         <option>E</option>
         <option>F</option>
     </select>
+    <div class="custom-control custom-switch">
+        <input type="checkbox" class="custom-control-input" id="groupSwitch">
+        <label class="custom-control-label" for="groupSwitch">Group by phase cal group</label>
+    </div>
 
     <div class="m-2 text-center">
         <div class="loading">
@@ -25,9 +29,9 @@
 
 {% block extrascript %}
     <script type="text/javascript">
-        function getPlot(field) {
+        function getPlot() {
             $(".loading").show();
-            $.getJSON('plots', {field: $("#fieldSelect").val()})
+            $.getJSON('plots', {field: $("#fieldSelect").val(), groupByPhase: $("#groupSwitch").prop("checked")})
                 .done(function(plot) {
                     $(".loading").hide();
                     $("#plot").empty();
@@ -35,11 +39,13 @@
                 })
         }
         $(document).ready(function() {
-            getPlot("A");
+            getPlot();
             $("#fieldSelect").change(function(event) {
-                var field = $(this).val();
-                getPlot(field);
+                getPlot();
             });
+            $("#groupSwitch").change(function(event) {
+                getPlot();
+            })
         });
     </script>
 {% endblock%}

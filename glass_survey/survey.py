@@ -7,13 +7,14 @@ import bokeh.transform
 import bokeh.models
 import bokeh.layouts
 import bokeh.embed
-from flask import Blueprint, current_app, request, render_template, json
+from flask import Blueprint, current_app, request, render_template, json, Response
 from glass_uvdata.const import (
     N_VIS_EXPECTED,
     N_CUTS_TARGET,
     N_CYCLES,
     N_CUTS_TARGET_CONFIG,
 )
+from glass_survey import db
 
 bp = Blueprint("survey", __name__, url_prefix="/survey")
 
@@ -137,31 +138,14 @@ def fill_lmst_gaps(_df: pd.DataFrame, n_target_scans=N_CUTS_TARGET, return_all=T
 
 
 @bp.route("/plots")
-def plots():
+def plots() -> Response:
     field = request.args.get("field", "A")
-    db = pymongo.MongoClient(current_app.config["MONGO_URI"]).glass
-    result = db.scans.aggregate(
-        [
-            {"$match": {"source": {"$regex": f"^(g23)?{field.lower()}_.*"}}},
-            {
-                "$lookup": {
-                    "from": "pointings",
-                    "localField": "source",
-                    "foreignField": "source",
-                    "as": "pointing",
-                }
-            },
-            {
-                "$replaceRoot": {
-                    "newRoot": {
-                        "$mergeObjects": [{"$arrayElemAt": ["$pointing", 0]}, "$$ROOT"]
-                    }
-                }
-            },
-            {"$project": {"pointing": False, "_id": False}},
-        ]
+    phase_cal_groups = request.args.get("groupByPhase", False) == "true"
+    df = pd.read_sql_query(
+        "SELECT datetime, lmst, n_unflagged, frac_vis, array_config, source, ra, `dec`, field, daily_set, `group` FROM scan JOIN pointing ON scan.source_id = pointing.source WHERE pointing.field = %(field)s",
+        db.engine,
+        params={'field': field}
     )
-    df = pd.DataFrame(data=result)
     df["lmst_angle"] = lmst_to_angle(df.lmst)  # convert LMST values to range 0-360
     df["array_config"] = df.array_config.str.replace(
         r"[A-z]", "km"
@@ -174,8 +158,8 @@ def plots():
             "n_unflagged": "sum",
             "lmst_angle": lambda lmst_angles: max_angle_gap(lmst_angles) / 360 * 24,
             "datetime": "count",
-            "RA": "first",
-            "Dec": "first",
+            "ra": "first",
+            "dec": "first",
             "field": "first",
             "daily_set": "first",
             "group": "first",
@@ -196,18 +180,47 @@ def plots():
     frac_vis_sources.columns = [
         "_".join(col) for col in frac_vis_sources.columns.to_flat_index()
     ]
-    for col in ["RA", "Dec", "field", "daily_set", "group"]:
+    for col in ["ra", "dec", "field", "daily_set", "group"]:
         frac_vis_sources = frac_vis_sources.drop(f"{col}_1.5km", axis=1).rename(
             columns={f"{col}_6km": col}
         )
 
+    if phase_cal_groups:
+        grp_groups = frac_vis_sources.groupby(['field', 'daily_set', 'group'])
+        frac_vis_groups = grp_groups.agg({
+            'n_unflagged_6km': 'sum',
+            'n_unflagged_1.5km': 'sum',
+            'n_expected_6km': 'sum',
+            'n_expected_1.5km': 'sum',
+            'ra': 'median',
+            'dec': 'median',
+        })
+        frac_vis_groups['frac_unflagged_6km'] = frac_vis_groups['n_unflagged_6km'] / frac_vis_groups['n_expected_6km']
+        frac_vis_groups['frac_unflagged_1.5km'] = frac_vis_groups['n_unflagged_1.5km'] / frac_vis_groups['n_expected_1.5km']
+
+        frac_vis_sources = frac_vis_sources.reset_index().set_index(['field', 'daily_set', 'group'])
+        cols = (
+            'n_unflagged_6km',
+            'n_unflagged_1.5km',
+            'n_expected_6km',
+            'n_expected_1.5km',
+            'frac_unflagged_6km',
+            'frac_unflagged_1.5km',
+        )
+        #for col in cols:
+        #    frac_vis_sources[col] = 0
+        for idx, data in frac_vis_groups.iterrows():
+            for col in cols:
+                frac_vis_sources.loc[idx, col] = data[col]
+        frac_vis_sources = frac_vis_sources.reset_index()
     data = bokeh.models.ColumnDataSource(frac_vis_sources)
+
     tools = "hover,pan,box_zoom,wheel_zoom,reset,save"
     tooltips = [
         ("source", "@source"),
         ("daily set", "@daily_set"),
         ("group", "@group"),
-        ("(RA, Dec)", "(@RA, @Dec)"),
+        ("(RA, Dec)", "(@ra, @dec)"),
         ("Unflagged 6km", "@frac_unflagged_6km"),
         ("Unflagged 1.5km", "@{frac_unflagged_1.5km}"),
     ]
@@ -216,7 +229,7 @@ def plots():
         title="Unflagged fraction 6km",
         x_axis_label="RA",
         y_axis_label="Dec",
-        x_range=(data.data["RA"].max()+0.2, data.data["RA"].min()-0.2),
+        x_range=(data.data["ra"].max()+0.2, data.data["ra"].min()-0.2),
         tools=tools,
         tooltips=tooltips,
     )
@@ -224,8 +237,8 @@ def plots():
         "frac_unflagged_6km", "Viridis256", low=0, high=1
     )
     p1.circle(
-        "RA",
-        "Dec",
+        "ra",
+        "dec",
         color=mapper_6km,
         radius=0.05,
         source=data,
@@ -246,8 +259,8 @@ def plots():
         "frac_unflagged_1.5km", "Viridis256", low=0, high=1
     )
     p2.circle(
-        "RA",
-        "Dec",
+        "ra",
+        "dec",
         color=mapper_1_5km,
         radius=0.05,
         source=data,
@@ -261,7 +274,24 @@ def plots():
     p1.add_layout(cbar, "right")
     p2.add_layout(cbar, "right")
 
-    layout = bokeh.layouts.row(p1, p2, sizing_mode="scale_width", margin=(0, 50, 0, 0))
+    coord_formatter = bokeh.models.widgets.NumberFormatter(format="0.000")
+    frac_formatter = bokeh.models.widgets.NumberFormatter(format="0.0%")
+    columns = [
+        bokeh.models.widgets.TableColumn(field="source", title="Source"),
+        bokeh.models.widgets.TableColumn(field="daily_set", title="Daily Set"),
+        bokeh.models.widgets.TableColumn(field="group", title="Phase cal group"),
+        bokeh.models.widgets.TableColumn(field="ra", title="RA", formatter=coord_formatter),
+        bokeh.models.widgets.TableColumn(field="dec", title="Dec", formatter=coord_formatter),
+        bokeh.models.widgets.TableColumn(field="frac_unflagged_6km", title="Unflagged 6km", formatter=frac_formatter),
+        bokeh.models.widgets.TableColumn(field="frac_unflagged_1.5km", title="Unflagged 1.5km", formatter=frac_formatter),
+    ]
+    table = bokeh.models.widgets.DataTable(source=data, columns=columns, height=200)
+
+    #layout = bokeh.layouts.row(p1, p2, sizing_mode="scale_width", margin=(0, 50, 0, 0))
+    layout = bokeh.layouts.layout([
+        [p1, p2],
+        [table],
+    ], sizing_mode="scale_width", margin=(0, 50, 0, 0))
 
     return json.jsonify(bokeh.embed.json_item(layout))
 
